@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 /**
- * Blink Wallet - Render Lightning Invoice QR Code
+ * Blink Wallet - Render Lightning Invoice QR Code (Terminal + PNG)
  *
  * Usage: node qr_invoice.js <bolt11_invoice>
  *
- * Renders a terminal QR code for a Lightning invoice (BOLT-11). Outputs the QR
- * to stderr so stdout remains clean JSON for agents.
+ * Renders a terminal QR code for a Lightning invoice (BOLT-11) to stderr,
+ * generates a PNG image file to /tmp, and outputs JSON with the file path.
  *
  * Arguments:
  *   bolt11_invoice - Required. The BOLT-11 payment request string (lnbc...)
  *
  * Output:
  *   - QR code to stderr (UTF-8 blocks)
- *   - JSON to stdout
+ *   - PNG file saved to /tmp/blink_qr_<timestamp>.png
+ *   - JSON to stdout (includes pngPath field)
  *
- * Dependencies: None (embedded Nayuki QR generator, MIT license)
+ * Dependencies: None (embedded Nayuki QR generator, MIT license; PNG via Node.js zlib/Buffer)
  */
 
 // QR Code generator library (JavaScript), adapted from Project Nayuki (MIT).
@@ -585,6 +586,9 @@ const qrcodegen = (() => {
   return { QrCode, QrSegment };
 })();
 
+const fs = require('fs');
+const zlib = require('zlib');
+
 function normalizeInvoice(input) {
   const trimmed = input.trim();
   if (trimmed.toLowerCase().startsWith('lightning:')) return trimmed.slice('lightning:'.length);
@@ -615,6 +619,77 @@ function getModule(qr, x, y) {
   return qr.getModule(x, y);
 }
 
+// ── PNG generation (Node.js built-ins only) ──────────────────────────────────
+
+function crc32(buf) {
+  // CRC-32/ISO-HDLC lookup table
+  if (!crc32._table) {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[i] = c;
+    }
+    crc32._table = t;
+  }
+  const table = crc32._table;
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function makeChunk(type, data) {
+  // PNG chunk: [4-byte length][4-byte type][data][4-byte CRC over type+data]
+  const typeBytes = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const combined = Buffer.concat([typeBytes, data]);
+  const crcVal = Buffer.alloc(4);
+  crcVal.writeUInt32BE(crc32(combined), 0);
+  return Buffer.concat([len, combined, crcVal]);
+}
+
+function renderQrToPng(qr, { border = 4, scale = 10 } = {}) {
+  const size = qr.size;
+  const imgSize = (size + border * 2) * scale;
+
+  // Build raw scanline data: filter byte (0x00) + grayscale pixels per row
+  const raw = Buffer.alloc(imgSize * (1 + imgSize));
+  let offset = 0;
+  for (let py = 0; py < imgSize; py++) {
+    raw[offset++] = 0x00; // filter: None
+    for (let px = 0; px < imgSize; px++) {
+      const mx = Math.floor(px / scale) - border;
+      const my = Math.floor(py / scale) - border;
+      const isDark = mx >= 0 && mx < size && my >= 0 && my < size && qr.getModule(mx, my);
+      raw[offset++] = isDark ? 0x00 : 0xFF;
+    }
+  }
+
+  // IHDR: width(4) height(4) bitDepth(1) colorType(1) compression(1) filter(1) interlace(1)
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(imgSize, 0);
+  ihdr.writeUInt32BE(imgSize, 4);
+  ihdr[8] = 8;   // bit depth
+  ihdr[9] = 0;   // color type: grayscale
+  ihdr[10] = 0;  // compression: deflate
+  ihdr[11] = 0;  // filter: adaptive
+  ihdr[12] = 0;  // interlace: none
+
+  const compressed = zlib.deflateSync(raw, { level: 9 });
+
+  // Assemble PNG
+  const signature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  return Buffer.concat([
+    signature,
+    makeChunk('IHDR', ihdr),
+    makeChunk('IDAT', compressed),
+    makeChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
 function main() {
   const args = process.argv.slice(2);
   if (args.length < 1) {
@@ -628,16 +703,27 @@ function main() {
     process.exit(1);
   }
 
+  // Uppercase for bech32 alphanumeric mode (~30% smaller QR)
   const normalized = invoice.toUpperCase();
   const qr = qrcodegen.QrCode.encodeText(normalized, qrcodegen.QrCode.Ecc.LOW);
+
+  // Terminal rendering to stderr
   const qrText = renderQrToString(qr, 1);
   console.error(qrText);
+
+  // PNG generation to /tmp
+  const pngBuf = renderQrToPng(qr, { border: 4, scale: 10 });
+  const pngPath = `/tmp/blink_qr_${Date.now()}.png`;
+  fs.writeFileSync(pngPath, pngBuf);
+  console.error(`PNG saved: ${pngPath} (${pngBuf.length} bytes)`);
 
   console.log(JSON.stringify({
     invoice: normalized,
     qrRendered: true,
     qrSize: qr.size,
     errorCorrection: 'L',
+    pngPath,
+    pngBytes: pngBuf.length,
   }, null, 2));
 }
 

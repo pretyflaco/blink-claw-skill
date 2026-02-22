@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Blink Wallet - Create USD-Denominated Lightning Invoice
+ * Blink Wallet - Create USD-Denominated Lightning Invoice (with auto-subscribe)
  *
- * Usage: node create_invoice_usd.js <amount_cents> [memo]
+ * Usage: node create_invoice_usd.js <amount_cents> [--timeout <seconds>] [--no-subscribe] [memo...]
  *
  * Creates a Lightning invoice denominated in USD cents. The sender pays in
  * BTC/Lightning, but the amount received is locked to a USD value at the
@@ -12,15 +12,25 @@
  * an exchange rate. Use BTC invoices (create_invoice.js) if you need
  * longer-lived invoices.
  *
+ * After creating the invoice, automatically opens a WebSocket subscription to
+ * watch for payment. Outputs TWO JSON objects to stdout:
+ *   1. Immediately: invoice creation result (paymentRequest, paymentHash, etc.)
+ *   2. When resolved: payment status (PAID, EXPIRED, TIMEOUT, ERROR)
+ *
+ * The agent can read the first JSON to share the invoice with the user right away,
+ * then wait for the second JSON to know when payment is received.
+ *
  * Arguments:
- *   amount_cents  - Required. Amount in USD cents (e.g. 100 = $1.00).
- *   memo          - Optional. Memo to attach to the invoice.
+ *   amount_cents   - Required. Amount in USD cents (e.g. 100 = $1.00).
+ *   --timeout <s>  - Optional. Subscription timeout in seconds (default: 300). Use 0 for no timeout.
+ *   --no-subscribe - Optional. Skip WebSocket subscription, just create and exit.
+ *   memo...        - Optional. Remaining args joined as memo text.
  *
  * Environment:
  *   BLINK_API_KEY  - Required. Blink API key (format: blink_...)
  *   BLINK_API_URL  - Optional. Override API endpoint (default: https://api.blink.sv/graphql)
  *
- * Dependencies: None (uses Node.js built-in fetch)
+ * Dependencies: None (uses Node.js built-in fetch and WebSocket)
  */
 
 const fs = require('fs');
@@ -28,6 +38,8 @@ const path = require('path');
 const os = require('os');
 
 const DEFAULT_API_URL = 'https://api.blink.sv/graphql';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getApiKey() {
   let key = process.env.BLINK_API_KEY;
@@ -44,6 +56,14 @@ function getApiKey() {
 
 function getApiUrl() {
   return process.env.BLINK_API_URL || DEFAULT_API_URL;
+}
+
+function getWsUrl() {
+  const apiUrl = getApiUrl();
+  const url = new URL(apiUrl);
+  url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+  if (url.hostname.startsWith('api.')) url.hostname = url.hostname.replace(/^api\./, 'ws.');
+  return url.toString();
 }
 
 async function graphqlRequest(query, variables = {}) {
@@ -69,6 +89,52 @@ async function graphqlRequest(query, variables = {}) {
   }
   return json.data;
 }
+
+// ── Arg parsing ──────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  let amountCents = null;
+  let timeoutSeconds = 300;
+  let noSubscribe = false;
+  const memoParts = [];
+
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === '--timeout') {
+      const value = argv[i + 1];
+      if (!value) throw new Error('Missing value for --timeout');
+      timeoutSeconds = parseInt(value, 10);
+      if (isNaN(timeoutSeconds) || timeoutSeconds < 0) throw new Error('--timeout must be a non-negative integer');
+      i++;
+      continue;
+    }
+
+    if (arg === '--no-subscribe') {
+      noSubscribe = true;
+      continue;
+    }
+
+    if (amountCents === null) {
+      amountCents = parseInt(arg, 10);
+      if (isNaN(amountCents) || amountCents <= 0) throw new Error('amount_cents must be a positive integer');
+      continue;
+    }
+
+    // Everything else is memo
+    memoParts.push(arg);
+  }
+
+  return {
+    amountCents,
+    timeoutSeconds,
+    noSubscribe,
+    memo: memoParts.length > 0 ? memoParts.join(' ') : undefined,
+  };
+}
+
+// ── GraphQL queries ──────────────────────────────────────────────────────────
 
 const WALLET_QUERY = `
   query Me {
@@ -103,6 +169,8 @@ const CREATE_USD_INVOICE_MUTATION = `
   }
 `;
 
+// ── Wallet resolution ────────────────────────────────────────────────────────
+
 async function getUsdWalletId() {
   const data = await graphqlRequest(WALLET_QUERY);
   if (!data.me) throw new Error('Authentication failed. Check your BLINK_API_KEY.');
@@ -111,30 +179,175 @@ async function getUsdWalletId() {
   return usdWallet.id;
 }
 
+// ── WebSocket subscription ───────────────────────────────────────────────────
+
+function subscribeToInvoice(paymentRequest, timeoutSeconds) {
+  if (typeof WebSocket !== 'function') {
+    console.error('Warning: WebSocket not available, skipping auto-subscribe. Run with node --experimental-websocket for auto-subscribe.');
+    return;
+  }
+
+  const apiKey = getApiKey();
+  const wsUrl = getWsUrl();
+
+  let done = false;
+  let timeoutId = null;
+
+  const ws = new WebSocket(wsUrl, 'graphql-transport-ws');
+
+  function finish(result, exitCode = 0) {
+    if (done) return;
+    done = true;
+    if (timeoutId) clearTimeout(timeoutId);
+    try {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ id: '1', type: 'complete' }));
+      }
+    } catch {}
+    try {
+      ws.close(1000);
+    } catch {}
+    if (result) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+    process.exit(exitCode);
+  }
+
+  if (timeoutSeconds > 0) {
+    timeoutId = setTimeout(() => {
+      console.error('Subscription timed out.');
+      finish({
+        event: 'subscription_result',
+        paymentRequest,
+        status: 'TIMEOUT',
+        isPaid: false,
+        isExpired: false,
+        isPending: true,
+      }, 1);
+    }, timeoutSeconds * 1000);
+  }
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      type: 'connection_init',
+      payload: { 'X-API-KEY': apiKey },
+    }));
+  };
+
+  ws.onmessage = (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (e) {
+      console.error('Warning: received non-JSON WebSocket message');
+      return;
+    }
+
+    if (message.type === 'connection_ack') {
+      console.error('Subscribed — waiting for payment...');
+      ws.send(JSON.stringify({
+        id: '1',
+        type: 'subscribe',
+        payload: {
+          query: `subscription LnInvoicePaymentStatus($input: LnInvoicePaymentStatusInput!) {
+  lnInvoicePaymentStatus(input: $input) {
+    status
+  }
+}`,
+          variables: { input: { paymentRequest } },
+        },
+      }));
+      return;
+    }
+
+    if (message.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong' }));
+      return;
+    }
+
+    if (message.type === 'error') {
+      console.error('Subscription error:', JSON.stringify(message.payload || message));
+      finish({
+        event: 'subscription_result',
+        paymentRequest,
+        status: 'ERROR',
+        error: message.payload || message,
+      }, 1);
+      return;
+    }
+
+    if (message.type === 'next') {
+      const status = message.payload && message.payload.data && message.payload.data.lnInvoicePaymentStatus
+        ? message.payload.data.lnInvoicePaymentStatus.status
+        : null;
+      if (!status) return;
+
+      console.error(`Invoice status: ${status}`);
+      if (status === 'PAID' || status === 'EXPIRED') {
+        finish({
+          event: 'subscription_result',
+          paymentRequest,
+          status,
+          isPaid: status === 'PAID',
+          isExpired: status === 'EXPIRED',
+          isPending: false,
+        }, 0);
+      }
+      return;
+    }
+
+    if (message.type === 'complete') {
+      finish({
+        event: 'subscription_result',
+        paymentRequest,
+        status: 'COMPLETE',
+        isPaid: false,
+        isExpired: false,
+        isPending: true,
+      }, 0);
+    }
+  };
+
+  ws.onerror = () => {
+    console.error('WebSocket error during subscription');
+    finish({
+      event: 'subscription_result',
+      paymentRequest,
+      status: 'ERROR',
+      error: 'WebSocket error',
+    }, 1);
+  };
+
+  ws.onclose = (event) => {
+    if (done) return;
+    console.error(`WebSocket closed: code=${event.code} reason=${event.reason || 'unknown'}`);
+    finish({
+      event: 'subscription_result',
+      paymentRequest,
+      status: 'CLOSED',
+      isPaid: false,
+      isExpired: false,
+      isPending: true,
+    }, 1);
+  };
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
 async function main() {
-  const args = process.argv.slice(2);
-  if (args.length < 1) {
-    console.error('Usage: node create_invoice_usd.js <amount_cents> [memo]');
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.amountCents === null) {
+    console.error('Usage: node create_invoice_usd.js <amount_cents> [--timeout <seconds>] [--no-subscribe] [memo...]');
     console.error('  amount_cents: amount in USD cents (e.g. 100 = $1.00)');
     process.exit(1);
   }
 
-  const amountCents = parseInt(args[0], 10);
-  if (isNaN(amountCents) || amountCents <= 0) {
-    console.error('Error: amount_cents must be a positive integer');
-    process.exit(1);
-  }
-
-  const memo = args.slice(1).join(' ') || undefined;
-
   // Auto-resolve USD wallet ID
   const walletId = await getUsdWalletId();
 
-  const input = {
-    walletId,
-    amount: amountCents,
-  };
-  if (memo) input.memo = memo;
+  const input = { walletId, amount: args.amountCents };
+  if (args.memo) input.memo = args.memo;
 
   const data = await graphqlRequest(CREATE_USD_INVOICE_MUTATION, { input });
   const result = data.lnUsdInvoiceCreate;
@@ -147,21 +360,34 @@ async function main() {
     throw new Error('Invoice creation returned no invoice and no errors.');
   }
 
-  const usdFormatted = `$${(amountCents / 100).toFixed(2)}`;
+  const usdFormatted = `$${(args.amountCents / 100).toFixed(2)}`;
   console.error(`Created USD invoice for ${usdFormatted} (${result.invoice.satoshis} sats at current rate)`);
   console.error('Note: USD invoices expire in ~5 minutes due to exchange rate lock.');
 
-  console.log(JSON.stringify({
+  // Phase 1: Output invoice creation result immediately
+  const creationResult = {
+    event: 'invoice_created',
     paymentRequest: result.invoice.paymentRequest,
     paymentHash: result.invoice.paymentHash,
     satoshis: result.invoice.satoshis,
-    amountCents,
+    amountCents: args.amountCents,
     amountUsd: usdFormatted,
     status: result.invoice.paymentStatus,
     createdAt: result.invoice.createdAt,
     walletId,
     walletCurrency: 'USD',
-  }, null, 2));
+  };
+
+  console.log(JSON.stringify(creationResult, null, 2));
+
+  // Phase 2: Auto-subscribe to payment status (unless opted out)
+  if (args.noSubscribe) {
+    console.error('Subscription skipped (--no-subscribe).');
+    process.exit(0);
+  }
+
+  console.error(`Auto-subscribing to invoice payment status (timeout: ${args.timeoutSeconds}s)...`);
+  subscribeToInvoice(result.invoice.paymentRequest, args.timeoutSeconds);
 }
 
 main().catch(e => {

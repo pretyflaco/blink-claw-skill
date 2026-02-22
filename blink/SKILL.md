@@ -1,6 +1,6 @@
 ---
 name: blink
-description: "Blink Lightning wallet for agents. Check BTC/USD balances (with USD estimates), create Lightning invoices, pay BOLT-11 invoices, send to Lightning Addresses, check invoice status, list transactions, estimate fees, get BTC price, convert sats/USD, view price history, list currencies. Use when handling Bitcoin Lightning payments, generating invoices for services, or paying for resources via Lightning."
+description: "Blink Lightning wallet for agents. Check BTC/USD balances (with USD estimates), create Lightning invoices (with auto-subscribe for payment notification), generate QR code PNG images, pay BOLT-11 invoices, send to Lightning Addresses, check invoice status, list transactions, estimate fees, get BTC price, convert sats/USD, view price history, list currencies. Use when handling Bitcoin Lightning payments, generating invoices for services, or paying for resources via Lightning."
 metadata: { "openclaw": { "emoji": "⚡", "requires": { "bins": ["node"], "env": ["BLINK_API_KEY"] }, "primaryEnv": "BLINK_API_KEY" } }
 ---
 
@@ -32,7 +32,7 @@ Get your API key from the [Blink Dashboard](https://dashboard.blink.sv) under AP
 - **Receive** — create invoices
 - **Write** — send payments (use with caution)
 
-No npm dependencies required. Scripts use Node.js built-in `fetch` (Node 18+).
+No npm dependencies required. Scripts use Node.js built-in `fetch` (Node 18+) and `WebSocket` (Node 22+ native, or Node 20+ with `--experimental-websocket` flag).
 
 ### Staging / Testnet
 
@@ -54,23 +54,35 @@ Returns JSON with all wallet balances (BTC in sats, USD in cents), wallet IDs, p
 
 ### Create Lightning Invoice (BTC)
 ```bash
-source ~/.profile && node {baseDir}/scripts/create_invoice.js <amount_sats> [memo]
+source ~/.profile && node {baseDir}/scripts/create_invoice.js <amount_sats> [--timeout <seconds>] [--no-subscribe] [memo...]
 ```
 
 Generates a BOLT-11 Lightning invoice for the specified amount in satoshis. Returns the `paymentRequest` string that can be paid by any Lightning wallet. The BTC wallet ID is resolved automatically.
 
+**Auto-subscribe**: After creating the invoice, the script automatically opens a WebSocket subscription and waits for payment. It outputs **two JSON objects** to stdout:
+1. **Immediately** — `{"event": "invoice_created", ...}` with `paymentRequest`, `paymentHash`, etc.
+2. **When resolved** — `{"event": "subscription_result", "status": "PAID"|"EXPIRED"|"TIMEOUT", ...}`
+
+The agent should read the first JSON to share the invoice/QR with the user right away, then wait for the second JSON to confirm payment.
+
 - `amount_sats` — amount in satoshis (required)
-- `memo` — optional description attached to the invoice
+- `--timeout <seconds>` — subscription timeout (default: 300). Use 0 for no timeout.
+- `--no-subscribe` — skip WebSocket auto-subscribe, just create the invoice and exit
+- `memo...` — optional description attached to the invoice (remaining args joined)
 
 ### Create Lightning Invoice (USD)
 ```bash
-source ~/.profile && node {baseDir}/scripts/create_invoice_usd.js <amount_cents> [memo]
+source ~/.profile && node {baseDir}/scripts/create_invoice_usd.js <amount_cents> [--timeout <seconds>] [--no-subscribe] [memo...]
 ```
 
 Creates a Lightning invoice denominated in USD cents. The sender pays in BTC/Lightning, but the received amount is locked to a USD value at the current exchange rate. Credited to the USD wallet. **Expires in ~5 minutes** due to exchange rate lock.
 
+**Auto-subscribe**: Same two-phase output as `create_invoice.js` — first JSON is the created invoice, second JSON is the payment resolution (PAID/EXPIRED/TIMEOUT).
+
 - `amount_cents` — amount in USD cents, e.g. 100 = $1.00 (required)
-- `memo` — optional description attached to the invoice
+- `--timeout <seconds>` — subscription timeout (default: 300). Use 0 for no timeout.
+- `--no-subscribe` — skip WebSocket auto-subscribe, just create the invoice and exit
+- `memo...` — optional description attached to the invoice (remaining args joined)
 
 ### Check Invoice Status
 ```bash
@@ -126,7 +138,19 @@ source ~/.profile && node {baseDir}/scripts/fee_probe.js <bolt11_invoice>
 source ~/.profile && node {baseDir}/scripts/qr_invoice.js <bolt11_invoice>
 ```
 
-Renders a terminal QR code for a Lightning invoice (BOLT-11). The QR is written to stderr, while stdout contains JSON metadata. Useful for quickly displaying an invoice for a human to scan.
+Renders a terminal QR code for a Lightning invoice (BOLT-11) to stderr and generates a **PNG image file** to `/tmp`. The stdout JSON includes a `pngPath` field with the absolute path to the PNG file.
+
+**Sending the QR image to a user**: After running this script, use the `pngPath` from the JSON output to send the PNG as a media attachment to the user in the current chat. The agent should use its native message-send capability with the file path.
+
+- `bolt11_invoice` — the BOLT-11 payment request string (required)
+
+Output JSON includes:
+- `invoice` — uppercased invoice string
+- `qrRendered` — always `true`
+- `qrSize` — QR module count
+- `errorCorrection` — `"L"` (LOW)
+- `pngPath` — absolute path to the generated PNG file (e.g. `/tmp/blink_qr_1234567890.png`)
+- `pngBytes` — file size in bytes
 
 Estimates the fee for paying a Lightning invoice without actually sending. Use before `pay_invoice.js` to check costs. Payments to other Blink users and direct-channel nodes are free (0 sats).
 
@@ -232,14 +256,28 @@ All scripts output structured JSON to stdout. Status messages and errors go to s
 }
 ```
 
-### Invoice creation output example
+### Invoice creation output example (two-phase)
+First JSON (immediate):
 ```json
 {
+  "event": "invoice_created",
   "paymentRequest": "lnbc500n1...",
   "paymentHash": "abc123...",
   "satoshis": 500,
   "status": "PENDING",
+  "createdAt": "2026-02-23T00:00:00Z",
   "walletId": "abc123"
+}
+```
+Second JSON (when payment resolves):
+```json
+{
+  "event": "subscription_result",
+  "paymentRequest": "lnbc500n1...",
+  "status": "PAID",
+  "isPaid": true,
+  "isExpired": false,
+  "isPending": false
 }
 ```
 
@@ -334,25 +372,50 @@ All scripts output structured JSON to stdout. Status messages and errors go to s
 
 ## Typical Agent Workflows
 
-### Receive a payment
+### Receive a payment (recommended — auto-subscribe + QR image)
 ```bash
-# 1. Create an invoice
-node {baseDir}/scripts/create_invoice.js 1000 "Payment for service"
-# 2. Give the paymentRequest to the payer
-# 3. Poll for payment
-node {baseDir}/scripts/check_invoice.js <payment_hash>
-# 4. Verify balance
-node {baseDir}/scripts/balance.js
+# 1. Create invoice — script auto-subscribes and outputs two JSON objects
+source ~/.profile && node {baseDir}/scripts/create_invoice.js 1000 "Payment for service"
+# → First JSON: {"event": "invoice_created", "paymentRequest": "lnbc...", ...}
+# → Read paymentRequest from first JSON immediately
+
+# 2. Generate QR code PNG
+source ~/.profile && node {baseDir}/scripts/qr_invoice.js <paymentRequest>
+# → JSON includes "pngPath": "/tmp/blink_qr_123456.png"
+# → Send the PNG file to the user as a media attachment in the current chat
+
+# 3. The create_invoice.js script is still running, waiting for payment
+# → Second JSON: {"event": "subscription_result", "status": "PAID", ...}
+# → When PAID: notify the user that payment has been received
+# → When EXPIRED: notify the user the invoice expired
 ```
 
-### Receive a payment (with realtime subscription)
+**Important**: The `create_invoice.js` script outputs two JSON objects separated by a newline. Parse them as separate JSON objects, not as a single JSON array. The first object arrives immediately; the second arrives when payment status resolves.
+
+### Receive a payment (polling fallback)
 ```bash
-# 1. Create an invoice
-node {baseDir}/scripts/create_invoice.js 1000 "Payment for service"
-# 2. Show QR to payer
-node {baseDir}/scripts/qr_invoice.js <payment_request>
-# 3. Wait for payment over WebSocket
-node --experimental-websocket {baseDir}/scripts/subscribe_invoice.js <payment_request> --timeout 300
+# 1. Create invoice without auto-subscribe
+source ~/.profile && node {baseDir}/scripts/create_invoice.js 1000 --no-subscribe "Payment for service"
+# 2. Give the paymentRequest to the payer
+# 3. Poll for payment
+source ~/.profile && node {baseDir}/scripts/check_invoice.js <payment_hash>
+# 4. Verify balance
+source ~/.profile && node {baseDir}/scripts/balance.js
+```
+
+### Receive a USD payment
+```bash
+# Same two-phase pattern as BTC, but using create_invoice_usd.js
+# Note: USD invoices expire in ~5 minutes
+source ~/.profile && node {baseDir}/scripts/create_invoice_usd.js 500 "Five dollars for service"
+# → First JSON: {"event": "invoice_created", "amountCents": 500, "amountUsd": "$5.00", ...}
+# Generate QR and send to user, then wait for second JSON
+```
+
+### Receive a payment (standalone WebSocket subscription)
+```bash
+# If you need to subscribe to an existing invoice separately
+source ~/.profile && node --experimental-websocket {baseDir}/scripts/subscribe_invoice.js <payment_request> --timeout 300
 ```
 
 ### Send a payment (with fee check)
@@ -402,16 +465,16 @@ node {baseDir}/scripts/price.js --history ONE_MONTH
 ## Files
 
 - `{baseDir}/scripts/balance.js` — Check wallet balances
-- `{baseDir}/scripts/create_invoice.js` — Create BTC Lightning invoices
-- `{baseDir}/scripts/create_invoice_usd.js` — Create USD-denominated Lightning invoices
-- `{baseDir}/scripts/check_invoice.js` — Check invoice payment status
+- `{baseDir}/scripts/create_invoice.js` — Create BTC Lightning invoices (auto-subscribes to payment status)
+- `{baseDir}/scripts/create_invoice_usd.js` — Create USD-denominated Lightning invoices (auto-subscribes to payment status)
+- `{baseDir}/scripts/check_invoice.js` — Check invoice payment status (polling)
 - `{baseDir}/scripts/pay_invoice.js` — Pay BOLT-11 invoices
 - `{baseDir}/scripts/pay_lnaddress.js` — Pay to Lightning Addresses
 - `{baseDir}/scripts/pay_lnurl.js` — Pay to LNURL strings
 - `{baseDir}/scripts/fee_probe.js` — Estimate payment fees
-- `{baseDir}/scripts/qr_invoice.js` — Render invoice QR code in terminal
+- `{baseDir}/scripts/qr_invoice.js` — Render invoice QR code (terminal + PNG file)
 - `{baseDir}/scripts/transactions.js` — List transaction history
 - `{baseDir}/scripts/price.js` — Get BTC/USD exchange rate
 - `{baseDir}/scripts/account_info.js` — Show account info and limits
-- `{baseDir}/scripts/subscribe_invoice.js` — Subscribe to invoice payment status
+- `{baseDir}/scripts/subscribe_invoice.js` — Subscribe to invoice payment status (standalone)
 - `{baseDir}/scripts/subscribe_updates.js` — Subscribe to realtime account updates
