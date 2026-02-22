@@ -121,6 +121,13 @@ Sends satoshis to a raw LNURL payRequest string. For Lightning Addresses (`user@
 source ~/.profile && node {baseDir}/scripts/fee_probe.js <bolt11_invoice>
 ```
 
+### Render Invoice QR Code
+```bash
+source ~/.profile && node {baseDir}/scripts/qr_invoice.js <bolt11_invoice>
+```
+
+Renders a terminal QR code for a Lightning invoice (BOLT-11). The QR is written to stderr, while stdout contains JSON metadata. Useful for quickly displaying an invoice for a human to scan.
+
 Estimates the fee for paying a Lightning invoice without actually sending. Use before `pay_invoice.js` to check costs. Payments to other Blink users and direct-channel nodes are free (0 sats).
 
 - `bolt11_invoice` — the BOLT-11 payment request string (required)
@@ -158,6 +165,24 @@ Multi-purpose exchange rate tool. All price queries are **public (no API key req
 source ~/.profile && node {baseDir}/scripts/account_info.js
 ```
 
+## Realtime Subscriptions
+
+Blink supports GraphQL subscriptions over WebSocket using the `graphql-transport-ws` protocol. Node 20 requires the `--experimental-websocket` flag.
+
+### Subscribe to Invoice Payment Status
+```bash
+source ~/.profile && node --experimental-websocket {baseDir}/scripts/subscribe_invoice.js <bolt11_invoice> [--timeout <seconds>]
+```
+
+Watches a single invoice and exits when it is **PAID** or **EXPIRED**. Status updates are printed to stderr. JSON result is printed to stdout.
+
+### Subscribe to Account Updates (myUpdates)
+```bash
+source ~/.profile && node --experimental-websocket {baseDir}/scripts/subscribe_updates.js [--timeout <seconds>] [--max <count>]
+```
+
+Streams account updates in real time. Each event is output as a JSON line (NDJSON) to stdout. Use `--max` to stop after N events.
+
 Shows account level, spending limits (withdrawal, internal send, convert), default wallet, and wallet summary with **pre-computed USD estimates** for BTC balances. Limits are denominated in USD cents with a rolling 24-hour window.
 
 ## API Reference
@@ -178,6 +203,8 @@ Shows account level, spending limits (withdrawal, internal send, convert), defau
 | Currency list | `query currencyList` | **None (public)** |
 | Realtime price | `query realtimePrice` | **None (public)** |
 | Account info | `query me` + `currencyConversionEstimation` | Read |
+| Subscribe invoice | `subscription lnInvoicePaymentStatus` | Read |
+| Subscribe updates | `subscription myUpdates` | Read |
 
 **API Endpoint:** `https://api.blink.sv/graphql` (production)
 **Authentication:** `X-API-KEY` header
@@ -318,6 +345,16 @@ node {baseDir}/scripts/check_invoice.js <payment_hash>
 node {baseDir}/scripts/balance.js
 ```
 
+### Receive a payment (with realtime subscription)
+```bash
+# 1. Create an invoice
+node {baseDir}/scripts/create_invoice.js 1000 "Payment for service"
+# 2. Show QR to payer
+node {baseDir}/scripts/qr_invoice.js <payment_request>
+# 3. Wait for payment over WebSocket
+node --experimental-websocket {baseDir}/scripts/subscribe_invoice.js <payment_request> --timeout 300
+```
+
 ### Send a payment (with fee check)
 ```bash
 # 1. Check current balance
@@ -372,6 +409,9 @@ node {baseDir}/scripts/price.js --history ONE_MONTH
 - `{baseDir}/scripts/pay_lnaddress.js` — Pay to Lightning Addresses
 - `{baseDir}/scripts/pay_lnurl.js` — Pay to LNURL strings
 - `{baseDir}/scripts/fee_probe.js` — Estimate payment fees
+- `{baseDir}/scripts/qr_invoice.js` — Render invoice QR code in terminal
 - `{baseDir}/scripts/transactions.js` — List transaction history
 - `{baseDir}/scripts/price.js` — Get BTC/USD exchange rate
 - `{baseDir}/scripts/account_info.js` — Show account info and limits
+- `{baseDir}/scripts/subscribe_invoice.js` — Subscribe to invoice payment status
+- `{baseDir}/scripts/subscribe_updates.js` — Subscribe to realtime account updates
