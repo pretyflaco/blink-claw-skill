@@ -5,7 +5,7 @@ metadata:
   oa:
     project: blink
     identifier: blink
-    version: "0.4.0"
+    version: "0.5.0"
     expires_at_unix: 1798761600
     capabilities:
       - http:outbound
@@ -27,6 +27,15 @@ Blink is a custodial Bitcoin Lightning wallet with a GraphQL API. Key concepts:
 - **Lightning Address** — human-readable address (`user@domain`) for sending payments without an invoice
 - **LNURL** — protocol for interacting with Lightning services via encoded URLs
 
+## Environment
+
+- Requires `bash` and Node.js 18+.
+- Requires `BLINK_API_KEY` environment variable with appropriate scopes.
+- For WebSocket subscriptions: Node 22+ (native) or Node 20+ with `--experimental-websocket`.
+- No npm dependencies. Scripts use Node.js built-in `fetch` and `WebSocket`.
+
+Use this skill for concrete wallet operations, not generic Lightning theory.
+
 ## Setup
 
 Store your API key in `~/.profile`:
@@ -41,8 +50,6 @@ Get your API key from the [Blink Dashboard](https://dashboard.blink.sv) under AP
 - **Receive** — create invoices
 - **Write** — send payments (use with caution)
 
-No npm dependencies required. Scripts use Node.js built-in `fetch` (Node 18+) and `WebSocket` (Node 22+ native, or Node 20+ with `--experimental-websocket` flag).
-
 ### Staging / Testnet
 
 To use the Blink staging environment (signet), set:
@@ -51,6 +58,55 @@ export BLINK_API_URL="https://api.staging.blink.sv/graphql"
 ```
 
 If not set, production (`https://api.blink.sv/graphql`) is used by default.
+
+## Workflow
+
+1. Pick the operation path first:
+- Receive payments (invoice creation, QR codes, payment monitoring).
+- Send payments (invoice pay, Lightning Address, LNURL, BTC or USD wallet).
+- Read-only queries (balance, transactions, price, account info).
+
+2. Configure API access from [blink-api-and-auth](references/blink-api-and-auth.md):
+- Set `BLINK_API_KEY` with the correct scopes for your operation.
+- Optionally set `BLINK_API_URL` for staging/testnet.
+- Verify connectivity with `balance.js`.
+
+3. For sending payments, follow [payment-operations](references/payment-operations.md):
+- Check balance before sending.
+- Probe fees with `fee_probe.js`.
+- Choose BTC or USD wallet with `--wallet` flag.
+- Execute payment and verify in transaction history.
+
+4. For receiving payments, follow [invoice-lifecycle](references/invoice-lifecycle.md):
+- Create BTC or USD invoice.
+- Parse two-phase output (invoice created, then payment resolution).
+- Generate QR code and send to payer.
+- Monitor via auto-subscribe, polling, or standalone subscription.
+
+5. Apply safety constraints:
+- Use minimum API key scopes for the task.
+- Test on staging before production.
+- Always check balance before sending.
+- Payments are irreversible once settled.
+
+## Quick Commands
+
+```bash
+# Check balances
+source ~/.profile && node {baseDir}/scripts/balance.js
+
+# Create BTC invoice (auto-subscribes to payment)
+source ~/.profile && node {baseDir}/scripts/create_invoice.js 1000 "Payment for service"
+
+# Pay a Lightning invoice
+source ~/.profile && node {baseDir}/scripts/pay_invoice.js lnbc1000n1...
+
+# Pay from USD wallet
+source ~/.profile && node {baseDir}/scripts/pay_invoice.js lnbc1000n1... --wallet USD
+
+# Get current BTC/USD price
+node {baseDir}/scripts/price.js
+```
 
 ## Core Commands
 
@@ -499,6 +555,12 @@ node {baseDir}/scripts/price.js --history ONE_MONTH
 - **Test on staging first** — use `BLINK_API_URL` to point at the signet staging environment
 - **USD invoices expire fast** — ~5 minutes due to exchange rate lock
 - **Price queries are public** — `price.js` works without an API key; only wallet operations require authentication
+
+## Reference Files
+
+- [blink-api-and-auth](references/blink-api-and-auth.md): API endpoints, authentication, scopes, staging/testnet configuration, and error handling.
+- [payment-operations](references/payment-operations.md): send workflows, BTC vs USD wallet selection, fee probing, and safety guardrails.
+- [invoice-lifecycle](references/invoice-lifecycle.md): invoice creation, two-phase output parsing, monitoring strategies, QR generation, and expiration handling.
 
 ## Files
 
