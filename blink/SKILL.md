@@ -5,7 +5,7 @@ metadata:
   oa:
     project: blink
     identifier: blink
-    version: "0.3.0"
+    version: "0.4.0"
     expires_at_unix: 1798761600
     capabilities:
       - http:outbound
