@@ -104,43 +104,51 @@ Checks the payment status of a Lightning invoice by its payment hash. Use after 
 
 ### Pay Lightning Invoice
 ```bash
-source ~/.profile && node {baseDir}/scripts/pay_invoice.js <bolt11_invoice>
+source ~/.profile && node {baseDir}/scripts/pay_invoice.js <bolt11_invoice> [--wallet BTC|USD]
 ```
 
-Pays a BOLT-11 Lightning invoice from the BTC wallet. Returns payment status: `SUCCESS`, `PENDING`, `FAILURE`, or `ALREADY_PAID`. The BTC wallet ID is resolved automatically.
+Pays a BOLT-11 Lightning invoice from the BTC or USD wallet. Returns payment status: `SUCCESS`, `PENDING`, `FAILURE`, or `ALREADY_PAID`. The wallet ID is resolved automatically.
 
 - `bolt11_invoice` — the BOLT-11 payment request string, e.g. `lnbc...` (required)
+- `--wallet BTC|USD` — wallet to pay from (default: BTC). When USD is selected, the Blink API debits the USD equivalent from the USD wallet.
 
 **Requires Write scope on the API key.**
 
 ### Pay to Lightning Address
 ```bash
-source ~/.profile && node {baseDir}/scripts/pay_lnaddress.js <lightning_address> <amount_sats>
+source ~/.profile && node {baseDir}/scripts/pay_lnaddress.js <lightning_address> <amount_sats> [--wallet BTC|USD]
 ```
 
-Sends satoshis to a Lightning Address (e.g. `user@blink.sv`). Returns payment status. The BTC wallet ID is resolved automatically.
+Sends satoshis to a Lightning Address (e.g. `user@blink.sv`). Returns payment status. The wallet ID is resolved automatically.
 
 - `lightning_address` — recipient in `user@domain` format (required)
 - `amount_sats` — amount in satoshis (required)
+- `--wallet BTC|USD` — wallet to pay from (default: BTC). When USD is selected, the amount is still specified in satoshis; the Blink API debits the USD equivalent from the USD wallet automatically.
 
 **Requires Write scope on the API key.**
 
 ### Pay to LNURL
 ```bash
-source ~/.profile && node {baseDir}/scripts/pay_lnurl.js <lnurl> <amount_sats>
+source ~/.profile && node {baseDir}/scripts/pay_lnurl.js <lnurl> <amount_sats> [--wallet BTC|USD]
 ```
 
 Sends satoshis to a raw LNURL payRequest string. For Lightning Addresses (`user@domain`), use `pay_lnaddress.js` instead.
 
 - `lnurl` — LNURL string, e.g. `lnurl1...` (required)
 - `amount_sats` — amount in satoshis (required)
+- `--wallet BTC|USD` — wallet to pay from (default: BTC). When USD is selected, the amount is still specified in satoshis; the Blink API debits the USD equivalent from the USD wallet automatically.
 
 **Requires Write scope on the API key.**
 
 ### Estimate Payment Fee
 ```bash
-source ~/.profile && node {baseDir}/scripts/fee_probe.js <bolt11_invoice>
+source ~/.profile && node {baseDir}/scripts/fee_probe.js <bolt11_invoice> [--wallet BTC|USD]
 ```
+
+Estimates the fee for paying a Lightning invoice without actually sending. Use before `pay_invoice.js` to check costs. Payments to other Blink users and direct-channel nodes are free (0 sats).
+
+- `bolt11_invoice` — the BOLT-11 payment request string (required)
+- `--wallet BTC|USD` — wallet to probe from (default: BTC). When USD is selected, uses `lnUsdInvoiceFeeProbe` to estimate fees from the USD wallet's perspective.
 
 ### Render Invoice QR Code
 ```bash
@@ -160,10 +168,6 @@ Output JSON includes:
 - `errorCorrection` — `"L"` (LOW)
 - `pngPath` — absolute path to the generated PNG file (e.g. `/tmp/blink_qr_1234567890.png`)
 - `pngBytes` — file size in bytes
-
-Estimates the fee for paying a Lightning invoice without actually sending. Use before `pay_invoice.js` to check costs. Payments to other Blink users and direct-channel nodes are free (0 sats).
-
-- `bolt11_invoice` — the BOLT-11 payment request string (required)
 
 ### List Transactions
 ```bash
@@ -198,6 +202,8 @@ Multi-purpose exchange rate tool. All price queries are **public (no API key req
 source ~/.profile && node {baseDir}/scripts/account_info.js
 ```
 
+Shows account level, spending limits (withdrawal, internal send, convert), default wallet, and wallet summary with **pre-computed USD estimates** for BTC balances. Limits are denominated in USD cents with a rolling 24-hour window.
+
 ## Realtime Subscriptions
 
 Blink supports GraphQL subscriptions over WebSocket using the `graphql-transport-ws` protocol. Node 20 requires the `--experimental-websocket` flag.
@@ -216,8 +222,6 @@ source ~/.profile && node --experimental-websocket {baseDir}/scripts/subscribe_u
 
 Streams account updates in real time. Each event is output as a JSON line (NDJSON) to stdout. Use `--max` to stop after N events.
 
-Shows account level, spending limits (withdrawal, internal send, convert), default wallet, and wallet summary with **pre-computed USD estimates** for BTC balances. Limits are denominated in USD cents with a rolling 24-hour window.
-
 ## API Reference
 
 | Operation | GraphQL | Scope Required |
@@ -229,7 +233,8 @@ Shows account level, spending limits (withdrawal, internal send, convert), defau
 | Pay invoice | `mutation lnInvoicePaymentSend` | Write |
 | Pay LN address | `mutation lnAddressPaymentSend` | Write |
 | Pay LNURL | `mutation lnurlPaymentSend` | Write |
-| Fee estimate | `mutation lnInvoiceFeeProbe` | Read |
+| Fee estimate (BTC) | `mutation lnInvoiceFeeProbe` | Read |
+| Fee estimate (USD) | `mutation lnUsdInvoiceFeeProbe` | Read |
 | Transactions | `query transactions` | Read |
 | Price / convert | `query currencyConversionEstimation` | **None (public)** |
 | Price history | `query btcPriceList` | **None (public)** |
@@ -241,6 +246,8 @@ Shows account level, spending limits (withdrawal, internal send, convert), defau
 
 **API Endpoint:** `https://api.blink.sv/graphql` (production)
 **Authentication:** `X-API-KEY` header
+
+**USD wallet notes:** The `lnInvoicePaymentSend`, `lnAddressPaymentSend`, and `lnurlPaymentSend` mutations all accept either a BTC or USD wallet ID. When a USD wallet ID is provided, the API debits the USD equivalent automatically. Amounts for `lnAddressPaymentSend` and `lnurlPaymentSend` are always specified in satoshis regardless of wallet type.
 
 ## Output Format
 
@@ -302,12 +309,24 @@ Second JSON (when payment resolves):
 }
 ```
 
-### Payment output example
+### Payment output example (BTC wallet)
 ```json
 {
   "status": "SUCCESS",
   "walletId": "abc123",
+  "walletCurrency": "BTC",
   "balanceBefore": 50000
+}
+```
+
+### Payment output example (USD wallet)
+```json
+{
+  "status": "SUCCESS",
+  "walletId": "def456",
+  "walletCurrency": "USD",
+  "balanceBefore": 1500,
+  "balanceBeforeFormatted": "$15.00"
 }
 ```
 
@@ -421,12 +440,6 @@ source ~/.profile && node {baseDir}/scripts/create_invoice_usd.js 500 "Five doll
 # Generate QR and send to user, then wait for second JSON
 ```
 
-### Receive a payment (standalone WebSocket subscription)
-```bash
-# If you need to subscribe to an existing invoice separately
-source ~/.profile && node --experimental-websocket {baseDir}/scripts/subscribe_invoice.js <payment_request> --timeout 300
-```
-
 ### Send a payment (with fee check)
 ```bash
 # 1. Check current balance
@@ -437,6 +450,22 @@ node {baseDir}/scripts/fee_probe.js lnbc1000n1...
 node {baseDir}/scripts/pay_invoice.js lnbc1000n1...
 # 4. Verify in transaction history
 node {baseDir}/scripts/transactions.js --first 1
+```
+
+### Send from the USD wallet
+```bash
+# Pay an invoice from the USD wallet
+node {baseDir}/scripts/fee_probe.js lnbc1000n1... --wallet USD
+node {baseDir}/scripts/pay_invoice.js lnbc1000n1... --wallet USD
+
+# Send to a Lightning Address from the USD wallet
+node {baseDir}/scripts/pay_lnaddress.js user@blink.sv 1000 --wallet USD
+
+# Send via LNURL from the USD wallet
+node {baseDir}/scripts/pay_lnurl.js lnurl1... 1000 --wallet USD
+
+# Note: for lnaddress and lnurl, the amount is always in satoshis.
+# The Blink API debits the USD equivalent from the USD wallet automatically.
 ```
 
 ### Convert sats to USD value
@@ -477,10 +506,10 @@ node {baseDir}/scripts/price.js --history ONE_MONTH
 - `{baseDir}/scripts/create_invoice.js` — Create BTC Lightning invoices (auto-subscribes to payment status)
 - `{baseDir}/scripts/create_invoice_usd.js` — Create USD-denominated Lightning invoices (auto-subscribes to payment status)
 - `{baseDir}/scripts/check_invoice.js` — Check invoice payment status (polling)
-- `{baseDir}/scripts/pay_invoice.js` — Pay BOLT-11 invoices
-- `{baseDir}/scripts/pay_lnaddress.js` — Pay to Lightning Addresses
-- `{baseDir}/scripts/pay_lnurl.js` — Pay to LNURL strings
-- `{baseDir}/scripts/fee_probe.js` — Estimate payment fees
+- `{baseDir}/scripts/pay_invoice.js` — Pay BOLT-11 invoices (BTC or USD wallet)
+- `{baseDir}/scripts/pay_lnaddress.js` — Pay to Lightning Addresses (BTC or USD wallet)
+- `{baseDir}/scripts/pay_lnurl.js` — Pay to LNURL strings (BTC or USD wallet)
+- `{baseDir}/scripts/fee_probe.js` — Estimate payment fees (BTC or USD wallet)
 - `{baseDir}/scripts/qr_invoice.js` — Render invoice QR code (terminal + PNG file)
 - `{baseDir}/scripts/transactions.js` — List transaction history
 - `{baseDir}/scripts/price.js` — Get BTC/USD exchange rate
