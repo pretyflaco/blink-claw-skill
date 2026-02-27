@@ -1,7 +1,16 @@
 ---
 name: blink
-description: "Blink Lightning wallet for agents. Check BTC/USD balances (with USD estimates), create Lightning invoices (with auto-subscribe for payment notification), generate QR code PNG images, pay BOLT-11 invoices, send to Lightning Addresses, check invoice status, list transactions, estimate fees, get BTC price, convert sats/USD, view price history, list currencies. Use when handling Bitcoin Lightning payments, generating invoices for services, or paying for resources via Lightning."
-metadata: { "openclaw": { "emoji": "⚡", "requires": { "bins": ["node"], "env": ["BLINK_API_KEY"] }, "primaryEnv": "BLINK_API_KEY" } }
+description: Blink Lightning wallet for agents — balances, invoices, payments, QR codes, price conversion, and transaction history.
+metadata:
+  oa:
+    project: blink
+    identifier: blink
+    version: "0.3.0"
+    expires_at_unix: 1798761600
+    capabilities:
+      - http:outbound
+      - filesystem:read
+      - process:spawn
 ---
 
 # Blink Skill
