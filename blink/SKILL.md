@@ -1,6 +1,7 @@
 ---
 name: blink
 description: Bitcoin Lightning wallet for agents — balances, invoices, payments, QR codes, price conversion, and transaction history via the Blink API.
+version: 1.0.0
 metadata:
   oa:
     project: blink
@@ -11,6 +12,13 @@ metadata:
       - http:outbound
       - filesystem:read
       - process:spawn
+  openclaw:
+    requires:
+      env: [BLINK_API_KEY]
+      bins: [node]
+    primaryEnv: BLINK_API_KEY
+    emoji: "⚡"
+    homepage: "https://github.com/blinkbitcoin/blink-skill"
 ---
 
 # Blink Skill
