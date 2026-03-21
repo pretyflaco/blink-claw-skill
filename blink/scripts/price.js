@@ -207,7 +207,7 @@ async function cmdHistory(range, apiKey, apiUrl) {
       const parsed = parseFloat(p.price.formattedAmount.replace(/[^0-9.-]/g, ''));
       btcPriceUsd = isNaN(parsed) ? null : Math.round(parsed * 100) / 100;
     }
-    if (btcPriceUsd == null) {
+    if (btcPriceUsd === null) {
       // Fallback: base * 10^offset gives the price in the denominator currency units
       // For USD, the API returns cents, so divide by 100 to get dollars
       btcPriceUsd = Math.round(decimalFromBaseOffset(p.price.base, p.price.offset) / 100 * 100) / 100;
