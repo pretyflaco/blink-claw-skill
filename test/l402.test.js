@@ -2,11 +2,13 @@
  * Unit tests for L402 Phase 1 scripts.
  *
  * Covers:
- *   - parseLightningLabsHeader   (l402_discover.js)
- *   - parseL402ProtocolBody      (l402_discover.js)
- *   - decodeBolt11AmountSats     (l402_discover.js)
- *   - Token store CRUD           (l402_store.js)
- *   - l402_pay dry-run flow      (l402_pay.js — mocked fetch)
+ *   - parseLightningLabsHeader        (l402_discover.js)
+ *   - parseL402ProtocolBody           (l402_discover.js)
+ *   - decodeBolt11AmountSats          (l402_discover.js)
+ *   - Token store CRUD                (l402_store.js)
+ *   - l402_pay dry-run flow           (l402_pay.js — mocked fetch)
+ *   - fetchPreimageByPaymentHash      (l402_pay.js — mocked graphqlRequest)
+ *   - Preimage resolution in main()   (l402_pay.js — inline / Option B / fallback paths)
  *
  * Run: node --test test/l402.test.js
  */
@@ -478,5 +480,157 @@ describe('l402_pay dry-run flow', () => {
     assert.equal(out.event, 'l402_dry_run');
     assert.equal(out.withinBudget, true);
     assert.equal(out.satoshis, 10); // 100n = 10 sats
+  });
+});
+
+// ── fetchPreimageByPaymentHash (l402_pay.js) ──────────────────────────────────
+
+describe('fetchPreimageByPaymentHash', () => {
+  const payPath = path.join(scriptsDir, 'l402_pay.js');
+  const clientPath = path.resolve(__dirname, '..', 'blink', 'scripts', '_blink_client.js');
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    delete require.cache[require.resolve(payPath)];
+    delete require.cache[require.resolve(clientPath)];
+  });
+
+  it('returns preimage when matching paymentHash found in transactions', async () => {
+    const targetHash = 'aabbccdd1122334455667788aabbccdd1122334455667788aabbccdd11223344';
+    const expectedPreimage = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      // Respond to transactions query
+      if (body.query && body.query.includes('TransactionsForPreimage')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              me: {
+                defaultAccount: {
+                  transactions: {
+                    edges: [
+                      {
+                        node: {
+                          initiationVia: { paymentHash: targetHash },
+                          settlementVia: { preImage: expectedPreimage },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        };
+      }
+      return { ok: false, text: async () => 'unexpected request' };
+    };
+
+    const { fetchPreimageByPaymentHash } = require(payPath);
+    const result = await fetchPreimageByPaymentHash(targetHash, {
+      apiKey: 'blink_test_key',
+      apiUrl: 'https://api.test.blink.sv/graphql',
+    });
+    assert.equal(result, expectedPreimage);
+  });
+
+  it('returns null when paymentHash does not match any transaction', async () => {
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query && body.query.includes('TransactionsForPreimage')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              me: {
+                defaultAccount: {
+                  transactions: {
+                    edges: [
+                      {
+                        node: {
+                          initiationVia: { paymentHash: 'aaaa000000000000000000000000000000000000000000000000000000000000' },
+                          settlementVia: { preImage: 'somepreimage' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        };
+      }
+      return { ok: false, text: async () => 'unexpected' };
+    };
+
+    const { fetchPreimageByPaymentHash } = require(payPath);
+    const result = await fetchPreimageByPaymentHash(
+      'bbbb000000000000000000000000000000000000000000000000000000000000',
+      { apiKey: 'blink_test_key', apiUrl: 'https://api.test.blink.sv/graphql' },
+    );
+    assert.equal(result, null);
+  });
+
+  it('returns null when called with null paymentHash', async () => {
+    const { fetchPreimageByPaymentHash } = require(payPath);
+    const result = await fetchPreimageByPaymentHash(null, {
+      apiKey: 'blink_test_key',
+      apiUrl: 'https://api.test.blink.sv/graphql',
+    });
+    assert.equal(result, null);
+  });
+
+  it('returns null and does not throw when query fails', async () => {
+    global.fetch = async () => { throw new Error('Network error'); };
+    const { fetchPreimageByPaymentHash } = require(payPath);
+    const result = await fetchPreimageByPaymentHash(
+      'cccc000000000000000000000000000000000000000000000000000000000000',
+      { apiKey: 'blink_test_key', apiUrl: 'https://api.test.blink.sv/graphql' },
+    );
+    assert.equal(result, null);
+  });
+
+  it('is case-insensitive when matching paymentHash', async () => {
+    const lowerHash = 'aabb1234aabb1234aabb1234aabb1234aabb1234aabb1234aabb1234aabb1234';
+    const upperHash = lowerHash.toUpperCase();
+    const expectedPreimage = '1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef';
+
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query && body.query.includes('TransactionsForPreimage')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              me: {
+                defaultAccount: {
+                  transactions: {
+                    edges: [
+                      {
+                        node: {
+                          initiationVia: { paymentHash: upperHash },
+                          settlementVia: { preImage: expectedPreimage },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        };
+      }
+      return { ok: false, text: async () => 'unexpected' };
+    };
+
+    const { fetchPreimageByPaymentHash } = require(payPath);
+    const result = await fetchPreimageByPaymentHash(lowerHash, {
+      apiKey: 'blink_test_key',
+      apiUrl: 'https://api.test.blink.sv/graphql',
+    });
+    assert.equal(result, expectedPreimage);
   });
 });

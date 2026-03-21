@@ -67,6 +67,45 @@ const PAY_INVOICE_MUTATION = `
         message
         path
       }
+      transaction {
+        initiationVia {
+          ... on InitiationViaLn {
+            paymentHash
+          }
+        }
+        settlementVia {
+          ... on SettlementViaLn {
+            preImage
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Query to retrieve preimage by payment hash (Option B fallback).
+// Used when lnInvoicePaymentSend does not return settlementVia inline (blinkbitcoin/blink#506).
+const TRANSACTIONS_BY_HASH_QUERY = `
+  query TransactionsForPreimage($first: Int, $walletIds: [WalletId]) {
+    me {
+      defaultAccount {
+        transactions(first: $first, walletIds: $walletIds) {
+          edges {
+            node {
+              initiationVia {
+                ... on InitiationViaLn {
+                  paymentHash
+                }
+              }
+              settlementVia {
+                ... on SettlementViaLn {
+                  preImage
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 `;
@@ -212,6 +251,51 @@ async function resolveL402Challenge(res) {
     paymentRequestUrl: l402proto.paymentRequestUrl,
     offers: l402proto.offers,
   };
+}
+
+// ── Preimage resolution ───────────────────────────────────────────────────────
+
+/**
+ * Attempt to retrieve the real payment preimage from the Blink transactions list.
+ *
+ * This is Option B from blinkbitcoin/blink#506: a second GraphQL query after
+ * payment, matching by paymentHash from lnInvoicePaymentSend's transaction.
+ *
+ * Returns the preimage hex string if found, or null if not available yet.
+ *
+ * @param {string} paymentHash  64-char hex payment hash (from initiationVia.paymentHash).
+ * @param {object} opts
+ * @param {string} opts.apiKey
+ * @param {string} opts.apiUrl
+ * @param {string} [opts.walletId]  Optional: narrow to one wallet.
+ * @returns {Promise<string|null>}
+ */
+async function fetchPreimageByPaymentHash(paymentHash, { apiKey, apiUrl, walletId }) {
+  if (!paymentHash) return null;
+  try {
+    const variables = { first: 10 };
+    if (walletId) variables.walletIds = [walletId];
+
+    const data = await graphqlRequest({
+      query: TRANSACTIONS_BY_HASH_QUERY,
+      variables,
+      apiKey,
+      apiUrl,
+      timeoutMs: 10_000,
+    });
+
+    const edges = data?.me?.defaultAccount?.transactions?.edges ?? [];
+    for (const { node } of edges) {
+      const txHash = node?.initiationVia?.paymentHash;
+      if (txHash && txHash.toLowerCase() === paymentHash.toLowerCase()) {
+        const preImage = node?.settlementVia?.preImage;
+        if (preImage) return preImage;
+      }
+    }
+  } catch (err) {
+    console.error(`Warning: preimage lookup query failed: ${err.message}`);
+  }
+  return null;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -370,20 +454,34 @@ async function main() {
 
   console.error(`Payment ${payResult.status === 'ALREADY_PAID' ? 'already paid' : 'successful'}!`);
 
-  // ── Derive preimage from payment result ──
-  // The Blink API does not return the preimage directly in lnInvoicePaymentSend.
-  // For Lightning Labs format: we reconstruct the L402 auth token as macaroon:preimage.
-  // For now we use the invoice payment hash as a proxy identifier.
-  // A proper preimage would require a separate query — we use a synthetic token
-  // based on the macaroon and invoice for the Authorization header.
-  //
-  // NOTE: For Lightning Labs L402 servers that verify the preimage cryptographically,
-  // a real preimage is needed. The Blink API's lnInvoicePaymentSend v1 does not
-  // return the preimage. We construct the best available token for the retry.
-  //
-  // Workaround: use the payment hash encoded from the BOLT-11 prefix as preimage placeholder.
-  // In production, the preimage should be obtained from the payment result when the API supports it.
-  const preimage = payResult.preimage || derivePreimageFromInvoice(challenge.invoice);
+  // ── Resolve preimage ──
+  // Option A (ideal): preImage returned inline via settlementVia in the mutation response.
+  //   Requires blinkbitcoin/blink#506 to be merged.
+  // Option B (interim): second query to transactions, match by paymentHash.
+  // Fallback: SHA-256(invoice) placeholder — works with non-strict servers only.
+  let preimage = payResult.transaction?.settlementVia?.preImage ?? null;
+  const paymentHash = payResult.transaction?.initiationVia?.paymentHash ?? null;
+
+  if (preimage) {
+    console.error('Preimage received inline from payment response.');
+  } else if (paymentHash) {
+    console.error(`Fetching preimage via transactions query (paymentHash: ${paymentHash.slice(0, 16)}…)`);
+    preimage = await fetchPreimageByPaymentHash(paymentHash, {
+      apiKey,
+      apiUrl,
+      walletId: wallet.id,
+    });
+    if (preimage) {
+      console.error('Preimage resolved via transactions query.');
+    } else {
+      console.error('Warning: preimage not yet indexed. Using placeholder (non-strict servers only).');
+      preimage = derivePreimageFromInvoice(challenge.invoice);
+    }
+  } else {
+    console.error('Warning: paymentHash not returned by API. Using preimage placeholder (non-strict servers only).');
+    preimage = derivePreimageFromInvoice(challenge.invoice);
+  }
+
   const macaroon = challenge.macaroon;
 
   // ── Save token to store ──
@@ -463,4 +561,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, resolveL402Challenge, derivePreimageFromInvoice };
+module.exports = { main, resolveL402Challenge, derivePreimageFromInvoice, fetchPreimageByPaymentHash };

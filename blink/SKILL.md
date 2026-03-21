@@ -1,13 +1,13 @@
 ---
 name: blink
 description: Bitcoin Lightning wallet for agents — balances, invoices, payments, BTC/USD swaps, QR codes, price conversion, transaction history, and L402 auto-pay client via the Blink API. All output is JSON.
-version: 1.4.0
+version: 1.4.1
 repository: https://github.com/blinkbitcoin/blink-skill
 metadata:
   oa:
     project: blink
     identifier: blink
-    version: "1.4.0"
+    version: "1.4.1"
     expires_at_unix: 1798761600
     capabilities:
       - http:outbound
@@ -922,7 +922,7 @@ Most scripts are stateless. The exception is `l402-pay`, which maintains a token
 - **Test on staging first** — use `BLINK_API_URL=https://api.staging.blink.sv/graphql` to point at the signet staging environment with test funds.
 - **USD invoices expire fast** — ~5 minutes due to exchange rate lock.
 - **Price queries are public** — `blink price` works without an API key; only wallet operations require authentication.
-- **L402 preimage limitation** — The Blink API (`lnInvoicePaymentSend`) does not return the payment preimage. `l402-pay` derives a placeholder preimage via SHA-256 of the invoice. This works for L402 servers using token-based verification, but may fail with servers that cryptographically verify the preimage against the payment hash.
+- **L402 preimage resolution** — After payment, `l402-pay` first checks if the mutation response returns the preimage inline (requires [blinkbitcoin/blink#506](https://github.com/blinkbitcoin/blink/issues/506)). If not, it fetches the preimage via a follow-up `transactions` query matched by payment hash (Option B). If the transaction is not yet indexed, it falls back to a SHA-256(invoice) placeholder, which works with servers using token-based verification but may fail with servers that cryptographically verify the preimage against the payment hash.
 
 ## Reference Files
 
