@@ -871,3 +871,118 @@ describe('l402_pay redirect handling', () => {
     assert.equal(out.url, 'https://www.api.example.com/resource');
   });
 });
+
+// ── runFeeProbe ───────────────────────────────────────────────────────────────
+
+describe('runFeeProbe', () => {
+  const { runFeeProbe } = require(path.join(scriptsDir, 'l402_pay'));
+
+  // We monkey-patch graphqlRequest on the module's closure by intercepting at
+  // the _blink_client level via global.fetch (the underlying transport).
+
+  const FAKE_INVOICE = 'lnbc100n1p0fakeprobe';
+  const FAKE_WALLET_ID = 'wallet-probe-test';
+
+  it('returns estimatedFeeSats when probe succeeds', async () => {
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        data: {
+          lnInvoiceFeeProbe: {
+            amount: 3,
+            errors: [],
+          },
+        },
+      }),
+      text: async () => JSON.stringify({ data: { lnInvoiceFeeProbe: { amount: 3, errors: [] } } }),
+    });
+
+    const result = await runFeeProbe(FAKE_INVOICE, {
+      walletId: FAKE_WALLET_ID,
+      walletCurrency: 'BTC',
+      apiKey: 'blink_test',
+      apiUrl: 'https://api.blink.sv/graphql',
+    });
+
+    assert.equal(result.error, null);
+    assert.equal(typeof result.estimatedFeeSats, 'number');
+  });
+
+  it('returns error string when probe reports API errors', async () => {
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        data: {
+          lnInvoiceFeeProbe: {
+            amount: null,
+            errors: [{ message: 'no route found', code: 'ROUTE_FINDING_ERROR', path: [] }],
+          },
+        },
+      }),
+      text: async () =>
+        JSON.stringify({
+          data: {
+            lnInvoiceFeeProbe: {
+              amount: null,
+              errors: [{ message: 'no route found', code: 'ROUTE_FINDING_ERROR', path: [] }],
+            },
+          },
+        }),
+    });
+
+    const result = await runFeeProbe(FAKE_INVOICE, {
+      walletId: FAKE_WALLET_ID,
+      walletCurrency: 'BTC',
+      apiKey: 'blink_test',
+      apiUrl: 'https://api.blink.sv/graphql',
+    });
+
+    assert.ok(result.error, 'Expected an error string');
+    assert.ok(result.error.includes('no route found'));
+    assert.equal(result.estimatedFeeSats, null);
+  });
+
+  it('returns error string when fetch throws (network failure)', async () => {
+    global.fetch = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+
+    const result = await runFeeProbe(FAKE_INVOICE, {
+      walletId: FAKE_WALLET_ID,
+      walletCurrency: 'BTC',
+      apiKey: 'blink_test',
+      apiUrl: 'https://api.blink.sv/graphql',
+    });
+
+    assert.ok(result.error, 'Expected an error string');
+    assert.ok(result.error.includes('ECONNREFUSED'));
+    assert.equal(result.estimatedFeeSats, null);
+  });
+
+  it('uses USD mutation when walletCurrency is USD', async () => {
+    let capturedBody = null;
+    global.fetch = async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ data: { lnUsdInvoiceFeeProbe: { amount: 1, errors: [] } } }),
+        text: async () => JSON.stringify({ data: { lnUsdInvoiceFeeProbe: { amount: 1, errors: [] } } }),
+      };
+    };
+
+    await runFeeProbe(FAKE_INVOICE, {
+      walletId: FAKE_WALLET_ID,
+      walletCurrency: 'USD',
+      apiKey: 'blink_test',
+      apiUrl: 'https://api.blink.sv/graphql',
+    });
+
+    assert.ok(capturedBody.query.includes('lnUsdInvoiceFeeProbe'), 'Expected USD mutation');
+  });
+});

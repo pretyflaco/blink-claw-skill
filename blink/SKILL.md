@@ -1,13 +1,13 @@
 ---
 name: blink
 description: Bitcoin Lightning wallet for agents — balances, invoices, payments, BTC/USD swaps, QR codes, price conversion, transaction history, and L402 auto-pay client via the Blink API. All output is JSON.
-version: 1.4.2
+version: 1.4.3
 repository: https://github.com/blinkbitcoin/blink-skill
 metadata:
   oa:
     project: blink
     identifier: blink
-    version: '1.4.2'
+    version: '1.4.3'
     expires_at_unix: 1798761600
     capabilities:
       - http:outbound
@@ -881,6 +881,7 @@ Makes an HTTP request. If the server returns 402, automatically parses the chall
 - `--body <string>` — request body for POST/PUT
 - `--no-store` — disable token cache (do not read or write `~/.blink/l402-tokens.json`)
 - `--force` — pay even if a valid cached token exists
+- `--probe` — run a fee probe (`lnInvoiceFeeProbe`) before paying to estimate routing fees; warns and continues if the probe fails; adds a `feeProbe` field to the `l402_paid` output
 
 **Requires Write scope on the API key.**
 
@@ -946,6 +947,27 @@ Token cache location: `~/.blink/l402-tokens.json`
   "satoshis": 100,
   "tokenReused": false,
   "retryStatus": 200,
+  "data": { "...": "response from the protected resource" }
+}
+```
+
+**l402-pay (after payment, with --probe):**
+
+```json
+{
+  "event": "l402_paid",
+  "url": "https://api.example.com/resource",
+  "format": "lightning-labs",
+  "paymentStatus": "SUCCESS",
+  "walletId": "abc123",
+  "walletCurrency": "BTC",
+  "satoshis": 100,
+  "tokenReused": false,
+  "retryStatus": 200,
+  "feeProbe": {
+    "estimatedFeeSats": 1,
+    "error": null
+  },
   "data": { "...": "response from the protected resource" }
 }
 ```

@@ -24,6 +24,7 @@
  *   --body           - Optional. Request body (for POST requests).
  *   --no-store       - Optional. Do not read from or write to the token store.
  *   --force          - Optional. Pay even if a cached token exists.
+ *   --probe          - Optional. Run a fee probe before paying; warns and continues if route not found.
  *
  * Environment:
  *   BLINK_API_KEY    - Required. Blink API key with Write scope.
@@ -110,6 +111,73 @@ const TRANSACTIONS_BY_HASH_QUERY = `
   }
 `;
 
+// ── Fee probe mutations ───────────────────────────────────────────────────────
+
+const FEE_PROBE_BTC_MUTATION = `
+  mutation LnInvoiceFeeProbe($input: LnInvoiceFeeProbeInput!) {
+    lnInvoiceFeeProbe(input: $input) {
+      amount
+      errors {
+        code
+        message
+        path
+      }
+    }
+  }
+`;
+
+const FEE_PROBE_USD_MUTATION = `
+  mutation LnUsdInvoiceFeeProbe($input: LnUsdInvoiceFeeProbeInput!) {
+    lnUsdInvoiceFeeProbe(input: $input) {
+      amount
+      errors {
+        code
+        message
+        path
+      }
+    }
+  }
+`;
+
+/**
+ * Run a fee probe for a Lightning invoice via the Blink API.
+ *
+ * Returns an object with:
+ *   { estimatedFeeSats: number | null, error: string | null }
+ *
+ * Never throws — errors are captured and returned as { error }.
+ * The caller decides whether to abort or warn-and-continue.
+ *
+ * @param {string} invoice   BOLT-11 payment request.
+ * @param {object} opts
+ * @param {string} opts.walletId
+ * @param {string} opts.walletCurrency  'BTC' or 'USD'
+ * @param {string} opts.apiKey
+ * @param {string} opts.apiUrl
+ * @returns {Promise<{ estimatedFeeSats: number | null, error: string | null }>}
+ */
+async function runFeeProbe(invoice, { walletId, walletCurrency, apiKey, apiUrl }) {
+  const mutation = walletCurrency === 'USD' ? FEE_PROBE_USD_MUTATION : FEE_PROBE_BTC_MUTATION;
+  const mutationKey = walletCurrency === 'USD' ? 'lnUsdInvoiceFeeProbe' : 'lnInvoiceFeeProbe';
+  try {
+    const data = await graphqlRequest({
+      query: mutation,
+      variables: { input: { walletId, paymentRequest: invoice } },
+      apiKey,
+      apiUrl,
+      timeoutMs: MUTATION_TIMEOUT_MS,
+    });
+    const result = data[mutationKey];
+    if (result.errors && result.errors.length > 0) {
+      const msg = result.errors.map((e) => `${e.message}${e.code ? ` [${e.code}]` : ''}`).join(', ');
+      return { estimatedFeeSats: null, error: msg };
+    }
+    return { estimatedFeeSats: result.amount ?? null, error: null };
+  } catch (err) {
+    return { estimatedFeeSats: null, error: err.message };
+  }
+}
+
 // ── Arg parsing ───────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -120,6 +188,7 @@ function parseArgs(argv) {
   let method = 'GET';
   let noStore = false;
   let force = false;
+  let probe = false;
   let body = null;
   const headers = {};
 
@@ -145,6 +214,8 @@ function parseArgs(argv) {
       noStore = true;
     } else if (arg === '--force') {
       force = true;
+    } else if (arg === '--probe') {
+      probe = true;
     } else if (arg === '--method' && i + 1 < argv.length) {
       method = argv[++i].toUpperCase();
       if (!['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
@@ -166,7 +237,7 @@ function parseArgs(argv) {
     }
   }
 
-  return { url, walletCurrency, maxAmount, dryRun, method, noStore, force, headers, body };
+  return { url, walletCurrency, maxAmount, dryRun, method, noStore, force, probe, headers, body };
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -495,6 +566,28 @@ async function main() {
     throw new Error('Insufficient balance: BTC wallet has 0 sats.');
   }
 
+  // ── Optional fee probe (--probe) ──
+  // Run lnInvoiceFeeProbe before paying to check the route exists.
+  // On failure: warn to stderr and continue — probe errors don't mean payment
+  // will fail (the probe is best-effort). On success: log estimated fee.
+  let feeProbeResult = null;
+  if (args.probe) {
+    console.error('Running fee probe...');
+    feeProbeResult = await runFeeProbe(challenge.invoice, {
+      walletId: wallet.id,
+      walletCurrency: args.walletCurrency,
+      apiKey,
+      apiUrl,
+    });
+    if (feeProbeResult.error) {
+      console.error(`Warning: fee probe failed (${feeProbeResult.error}) — proceeding with payment anyway.`);
+    } else {
+      console.error(
+        `Fee probe: estimated routing fee = ${feeProbeResult.estimatedFeeSats ?? 0} sats. Proceeding with payment.`,
+      );
+    }
+  }
+
   console.error(`Paying ${satoshis ?? '?'} sats via Blink...`);
 
   const payData = await graphqlRequest({
@@ -595,6 +688,9 @@ async function main() {
     walletCurrency: args.walletCurrency,
     satoshis: satoshis ?? null,
     tokenReused: false,
+    feeProbe: feeProbeResult
+      ? { estimatedFeeSats: feeProbeResult.estimatedFeeSats, error: feeProbeResult.error }
+      : undefined,
     retryStatus: retryRes.status,
     data: retryData,
   };
@@ -636,4 +732,5 @@ module.exports = {
   resolveL402Challenge,
   derivePreimageFromInvoice,
   fetchPreimageByPaymentHash,
+  runFeeProbe,
 };

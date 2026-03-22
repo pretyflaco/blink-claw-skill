@@ -275,22 +275,6 @@ async function main() {
     return;
   }
 
-  if (res.status !== 402) {
-    const body = await res.text().catch(() => '');
-    const output = {
-      url: args.url,
-      l402_detected: false,
-      status: res.status,
-      message:
-        res.status === 200
-          ? 'No L402 protection detected — resource returned 200 OK.'
-          : `Unexpected status ${res.status}. Not an L402 endpoint.`,
-      body: body.length <= 500 ? body : body.slice(0, 500) + '…',
-    };
-    console.log(JSON.stringify(output, null, 2));
-    return;
-  }
-
   console.error('402 Payment Required detected — parsing L402 challenge...');
 
   // ── Try Lightning Labs format first (WWW-Authenticate header) ──
