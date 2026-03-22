@@ -43,11 +43,20 @@ const RC_FILES = ['.profile', '.bashrc', '.bash_profile', '.zshrc'];
 const API_KEY_RE = /(?:^|\n)\s*(?:export\s+)?BLINK_API_KEY\s*=\s*["']?([a-zA-Z0-9_]+)["']?/;
 
 function getApiKey({ required = true } = {}) {
+  // [security] Reading BLINK_API_KEY from the environment so it can be sent as
+  // the X-API-KEY request header to api.blink.sv only.  This is the standard,
+  // recommended way to supply credentials to the Blink wallet API; no other
+  // host ever receives this value.
   let key = process.env.BLINK_API_KEY;
   if (!key) {
     const home = os.homedir();
     for (const rc of RC_FILES) {
       try {
+        // [security] Reading shell rc files (~/.bashrc etc.) solely to extract
+        // BLINK_API_KEY via a narrow regex (API_KEY_RE).  Only that one token
+        // is used; the full file content is never transmitted anywhere.  This
+        // fallback helps users who set the key in their shell environment
+        // without re-exporting it to the current process.
         const content = fs.readFileSync(path.join(home, rc), 'utf8');
         const match = content.match(API_KEY_RE);
         if (match) {
