@@ -1,7 +1,7 @@
 ---
 name: blink
 description: Bitcoin Lightning wallet for agents — balances, invoices, payments, BTC/USD swaps, QR codes, price conversion, transaction history, and L402 auto-pay client via the Blink API. All output is JSON.
-version: 1.4.7
+version: 1.5.0
 repository: https://github.com/blinkbitcoin/blink-skill
 metadata:
   oa:
@@ -972,6 +972,114 @@ Token cache location: `~/.blink/l402-tokens.json`
 }
 ```
 
+## L402 Producer Commands
+
+L402 producer tools let you **protect your own API resources** behind a Lightning paywall. Issue challenges to clients, then verify their payment proofs before granting access.
+
+Two-step workflow:
+
+1. When a client requests a resource, call `blink l402-challenge` to create a signed payment challenge and return it with HTTP 402.
+2. When the client submits a payment token, call `blink l402-verify` to verify the preimage and macaroon signature.
+
+### Create an L402 Challenge
+
+```bash
+blink l402-challenge --amount <sats> [options]
+```
+
+Creates a Lightning invoice via Blink and issues a signed macaroon bound to its payment hash. Returns a ready-to-send `WWW-Authenticate` header.
+
+- `--amount <sats>` — invoice amount in satoshis (required)
+- `--wallet <id>` — Blink BTC wallet ID (auto-resolved if omitted)
+- `--memo <text>` — invoice memo / description
+- `--expiry <seconds>` — macaroon caveat expiry (e.g. `3600` = 1 hour); controls how long the challenge is valid, not the invoice expiry
+- `--resource <id>` — resource identifier caveat (e.g. `/api/v1/data`); returned tokens will only be valid for this exact path
+
+**Requires Write scope on the API key.**
+
+Root key for HMAC signing resolves in this order:
+
+1. `BLINK_L402_ROOT_KEY` env var (64-char hex, 32 bytes)
+2. `~/.blink/l402-root-key` (auto-created on first run)
+
+> **AGENT:** Keep `BLINK_L402_ROOT_KEY` or `~/.blink/l402-root-key` stable across server restarts. A different root key will invalidate all previously issued macaroons.
+
+### Verify an L402 Payment Token
+
+```bash
+blink l402-verify --token <macaroon>:<preimage> [options]
+blink l402-verify --macaroon <b64> --preimage <hex> [options]
+```
+
+Verifies a client-submitted L402 `Authorization` token. Performs three layers of verification:
+
+1. **Preimage check:** `SHA-256(preimage) === payment_hash` — cryptographic proof the invoice was paid
+2. **Signature check:** HMAC-SHA256 of macaroon body — proves the macaroon was issued by this server
+3. **Caveat check:** expiry not exceeded, resource matches if constrained
+
+- `--token <macaroon>:<preimage>` — L402 authorization token (colon-separated, from `Authorization: L402 <token>` header)
+- `--macaroon <b64>` — base64url-encoded macaroon (alternative to `--token`)
+- `--preimage <hex>` — 64-char hex preimage (alternative to `--token`)
+- `--resource <id>` — expected resource identifier to check against the macaroon's resource caveat
+- `--check-api` — additionally query the Blink API to confirm PAID status (belt-and-suspenders)
+
+Exit code `0` when `valid: true`, exit code `1` when `valid: false` or on error.
+
+### L402 Producer Output Examples
+
+**l402-challenge:**
+
+```json
+{
+  "header": "L402 macaroon=\"AgEL...\", invoice=\"lnbc100n1...\"",
+  "macaroon": "AgEL...",
+  "invoice": "lnbc100n1...",
+  "paymentHash": "abc123...64hex",
+  "satoshis": 100,
+  "expiresAt": 1735689600,
+  "resource": "/api/v1/data"
+}
+```
+
+Return this to clients as:
+
+```
+HTTP/1.1 402 Payment Required
+WWW-Authenticate: L402 macaroon="AgEL...", invoice="lnbc100n1..."
+```
+
+**l402-verify (valid payment):**
+
+```json
+{
+  "valid": true,
+  "preimageValid": true,
+  "signatureValid": true,
+  "caveatsValid": true,
+  "paymentHash": "abc123...64hex",
+  "resource": "/api/v1/data",
+  "expiresAt": 1735689600,
+  "expired": false,
+  "apiStatus": "NOT_CHECKED"
+}
+```
+
+**l402-verify (invalid — wrong preimage):**
+
+```json
+{
+  "valid": false,
+  "preimageValid": false,
+  "signatureValid": true,
+  "caveatsValid": true,
+  "paymentHash": "abc123...64hex",
+  "resource": null,
+  "expiresAt": null,
+  "expired": false,
+  "apiStatus": "NOT_CHECKED"
+}
+```
+
 ## Security
 
 ### API Key Handling
@@ -1037,3 +1145,6 @@ Most scripts are stateless. The exception is `l402-pay`, which maintains a token
 - `{baseDir}/scripts/l402_discover.js` — Probe a URL for L402 payment requirements (no payment)
 - `{baseDir}/scripts/l402_pay.js` — Auto-pay L402-gated resources via Blink + token caching
 - `{baseDir}/scripts/l402_store.js` — Manage the L402 token cache (~/.blink/l402-tokens.json)
+- `{baseDir}/scripts/_l402_macaroon.js` — Shared macaroon module: encode/decode/sign/verify + root key management
+- `{baseDir}/scripts/l402_challenge_create.js` — Create L402 payment challenges (invoice + signed macaroon)
+- `{baseDir}/scripts/l402_payment_verify.js` — Verify L402 client payment tokens (preimage + HMAC + caveats)

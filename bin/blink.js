@@ -616,6 +616,77 @@ commands['l402-store'] = {
   },
 };
 
+commands['l402-challenge'] = {
+  description: 'Create an L402 payment challenge (invoice + signed macaroon) to protect a resource',
+  args: [],
+  options: {
+    amount: { type: 'string' },
+    wallet: { type: 'string', short: 'w' },
+    memo: { type: 'string' },
+    expiry: { type: 'string' },
+    resource: { type: 'string' },
+  },
+  optMeta: {
+    amount: { description: 'Invoice amount in satoshis (required)', valueName: 'sats' },
+    wallet: { description: 'Blink BTC wallet ID (auto-resolved if omitted)', valueName: 'id' },
+    memo: { description: 'Invoice memo / description', valueName: 'text' },
+    expiry: { description: 'Macaroon expiry in seconds from now (e.g. 3600)', valueName: 'seconds' },
+    resource: { description: 'Resource identifier caveat (e.g. /api/v1/data)', valueName: 'id' },
+  },
+  examples: [
+    'blink l402-challenge --amount 100',
+    'blink l402-challenge --amount 100 --expiry 3600 --resource /api/data',
+    'blink l402-challenge --amount 500 --memo "Premium API access"',
+  ],
+  action: async (_pos, opts) => {
+    const argv = [];
+    if (opts.amount) argv.push('--amount', opts.amount);
+    if (opts.wallet) argv.push('--wallet', opts.wallet);
+    if (opts.memo) argv.push('--memo', opts.memo);
+    if (opts.expiry) argv.push('--expiry', opts.expiry);
+    if (opts.resource) argv.push('--resource', opts.resource);
+    setProcessArgv(argv);
+    const { main } = require(path.join(scriptsDir, 'l402_challenge_create.js'));
+    await main();
+  },
+};
+
+commands['l402-verify'] = {
+  description: 'Verify an L402 payment token (preimage + macaroon signature + caveats)',
+  args: [],
+  options: {
+    token: { type: 'string' },
+    macaroon: { type: 'string' },
+    preimage: { type: 'string' },
+    resource: { type: 'string' },
+    'check-api': { type: 'boolean', default: false },
+  },
+  optMeta: {
+    token: { description: 'L402 token in <macaroon>:<preimage> format', valueName: 'macaroon:preimage' },
+    macaroon: { description: 'base64url-encoded macaroon (alternative to --token)', valueName: 'b64' },
+    preimage: { description: '64-char hex preimage (alternative to --token)', valueName: 'hex' },
+    resource: { description: 'Expected resource identifier for caveat check', valueName: 'id' },
+    'check-api': { description: 'Query Blink API to confirm PAID status' },
+  },
+  examples: [
+    'blink l402-verify --token <macaroon>:<preimage>',
+    'blink l402-verify --macaroon <b64> --preimage <hex>',
+    'blink l402-verify --token <macaroon>:<preimage> --check-api',
+    'blink l402-verify --token <macaroon>:<preimage> --resource /api/data',
+  ],
+  action: async (_pos, opts) => {
+    const argv = [];
+    if (opts.token) argv.push('--token', opts.token);
+    if (opts.macaroon) argv.push('--macaroon', opts.macaroon);
+    if (opts.preimage) argv.push('--preimage', opts.preimage);
+    if (opts.resource) argv.push('--resource', opts.resource);
+    if (opts['check-api']) argv.push('--check-api');
+    setProcessArgv(argv);
+    const { main } = require(path.join(scriptsDir, 'l402_payment_verify.js'));
+    await main();
+  },
+};
+
 // ── Help formatting ──────────────────────────────────────────────────────────
 
 function formatMainHelp() {
